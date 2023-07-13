@@ -40,6 +40,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from networks import vit_utils as utils
+from .sam_vit import ImageEncoderViT
 
 _logger = logging.getLogger(name=Path(__file__).parents[1].stem)
 
@@ -638,6 +639,7 @@ vit_factory = {
     'ViT-L/32':          {'patch_size': 32, 'embed_dim': 1024, 'depth': 24, 'num_heads': 16, 'distilled': False},
     'ViT-L/16':          {'patch_size': 16, 'embed_dim': 1024, 'depth': 24, 'num_heads': 16, 'distilled': False},
     'ViT-L/16-384':      {'patch_size': 16, 'embed_dim': 1024, 'depth': 24, 'num_heads': 16, 'distilled': False},
+    'SAM-ViT-L/16-384':  {'patch_size': 16, 'embed_dim': 1024, 'depth': 24, 'num_heads': 16, 'distilled': False},
 
     'DeiT-T/16':         {'patch_size': 16, 'embed_dim':  192, 'depth': 12, 'num_heads': 3, 'distilled': True},
     'DeiT-S/16':         {'patch_size': 16, 'embed_dim':  384, 'depth': 12, 'num_heads': 6, 'distilled': True},
@@ -655,17 +657,33 @@ def vit_model(model_type,
               logger=None,
               original=False,
               depth=None):
-    return VisionTransformer(img_size=image_size,
-                             patch_size=vit_factory[model_type]['patch_size'],
-                             in_chans=init_channels,
-                             num_classes=num_classes,
-                             embed_dim=vit_factory[model_type]['embed_dim'],
-                             depth=depth or opt.vit_depth or vit_factory[model_type]['depth'],
-                             num_heads=vit_factory[model_type]['num_heads'],
-                             pretrained=pretrained,
-                             distilled=vit_factory[model_type]['distilled'],
-                             opt=opt,
-                             logger=logger,
-                             original=original)
+    if model_type in ['SAM-ViT-L/16-384']:
+        return ImageEncoderViT(
+            img_size=image_size,
+            patch_size=vit_factory[model_type]['patch_size'],
+            in_chans=init_channels,
+            num_classes=num_classes,
+            embed_dim=vit_factory[model_type]['embed_dim'],
+            depth=depth or opt.vit_depth or vit_factory[model_type]['depth'],
+            num_heads=vit_factory[model_type]['num_heads'],
+            pretrained=pretrained,
+            distilled=vit_factory[model_type]['distilled'],
+            opt=opt,
+            original=original
+        )
+
+    else:
+        return VisionTransformer(img_size=image_size,
+                                 patch_size=vit_factory[model_type]['patch_size'],
+                                 in_chans=init_channels,
+                                 num_classes=num_classes,
+                                 embed_dim=vit_factory[model_type]['embed_dim'],
+                                 depth=depth or opt.vit_depth or vit_factory[model_type]['depth'],
+                                 num_heads=vit_factory[model_type]['num_heads'],
+                                 pretrained=pretrained,
+                                 distilled=vit_factory[model_type]['distilled'],
+                                 opt=opt,
+                                 logger=logger,
+                                 original=original)
 
 

@@ -21,6 +21,7 @@ class FewShotMetric(object):
                 fp = int((np.logical_and(p == j, r != 255) * np.logical_and(r != j, r != 255)).sum())
                 fn = int((np.logical_and(p != j, r != 255) * np.logical_and(r == j, r != 255)).sum())
                 if verbose:
+                    print(np.sum(p > 0))
                     print(tp / (tp + fp + fn))
                 self.stat[c, 0] += tp
                 self.stat[c, 1] += fp

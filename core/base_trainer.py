@@ -106,7 +106,7 @@ class BaseEvaluator(object):
     def start_eval_loop(self, data_loader, num_classes, epoch=None):
         """ For few-shot learning """
         # Set model to evaluation mode (for specific layers, such as batchnorm, dropout, dropblock)
-        self.model.eval()
+        # self.model.eval()
         # Fix sampling order of the test set.
         data_loader.dataset.reset_sampler()
         timer = Timer()

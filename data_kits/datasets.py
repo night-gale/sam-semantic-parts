@@ -60,7 +60,7 @@ def get_val_transforms(opt, height, width):
     return supp_transform, query_transform
 
 
-def load(opt, logger, mode):
+def load(opt, logger, mode, transform=None):
     split, shot, query = opt.split, opt.shot, 1
     height, width = opt.height, opt.width
 
@@ -70,6 +70,11 @@ def load(opt, logger, mode):
         data_transform = get_val_transforms(opt, height, width)
     else:
         raise ValueError(f'Not supported mode: {mode}. [train|eval_online|test|predict]')
+    if transform is not None:
+        data_transform = (
+            tf.Compose([tf.ToTensor(mask_dtype='float')], processer=opt.proc),
+            tf.Compose([tf.ToTensor(mask_dtype='long')], processer=opt.proc),
+        )
 
     if opt.dataset == "PASCAL":
         num_classes = 20

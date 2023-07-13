@@ -1,8 +1,10 @@
 from networks.FPTrans import FPTrans
+from networks.FPTrans_fixed import FPTransFixed
 
 
 __networks = {
     'fptrans': FPTrans,
+    'fptrans_fixed': FPTransFixed
 }
 
 

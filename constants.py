@@ -34,6 +34,7 @@ pretrained_weights = {
     # "ViT-S/16-i21k":    pretrained_dir / "vit/S_16-i21k-300ep-lr_0.001-aug_light1-wd_0.03-do_0.0-sd_0.0--imagenet2012-steps_20k-lr_0.03-res_224.npz",
     # "ViT-L/16":         pretrained_dir / "vit/L_16-i1k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.1-sd_0.1--imagenet2012-steps_20k-lr_0.01-res_224.npz",
     # "ViT-L/16-384":     pretrained_dir / "vit/L_16-i1k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.1-sd_0.1--imagenet2012-steps_20k-lr_0.01-res_384.npz",
+    'SAM-ViT-L/16-384':  pretrained_dir / "sam/sam_vit_l_0b3195.pth",
 
     "DeiT-T/16":        pretrained_dir / "deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth",
     "DeiT-S/16":        pretrained_dir / "deit/deit_small_distilled_patch16_224-649709d9.pth",
