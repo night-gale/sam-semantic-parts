@@ -70,6 +70,13 @@ def main(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=Fals
     bar = tqdm.tqdm(range(len(ds_test)))
     metric_m1 = FewShotMetric(n_class=num_classes)
 
+    if opt.dataset in ['COCO']:
+        np.random.seed(42)
+        test_sample_indices = np.random.choice(np.arange(len(ds_test)), 500)
+    else:
+        test_sample_indices = np.arange(len(ds_test))
+    bar = tqdm.tqdm(test_sample_indices)
+
     for ii in bar:
         sample = ds_test[ii]
 

@@ -17,6 +17,7 @@ from core.metrics import FewShotMetric
 from per_segment_anything import sam_model_registry, SamPredictor
 from segment_anything import SamAutomaticMaskGenerator
 from timm.models import vit_base_patch32_224_clip_laion2b, vit_base_patch16_224_dino
+from data_kits.perseg import PerSeg
 import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
@@ -32,12 +33,14 @@ torch.set_printoptions(precision=8)
 def test(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=False):
     opt, logger, device = init_environment(ex, _run, _config, eval_after_train=eval_after_train)
 
-    # clip_image_encoder = None
-    clip_image_encoder = vit_base_patch32_224_clip_laion2b(pretrained=True).cuda()
+    if opt.dataset in ['PASCAL', 'COCO']:
+        ds_test, data_loader, num_classes = datasets.load(opt, logger, "test", transform='whatever')
+        ds_test.reset_sampler()
+        ds_test.sample_tasks()
+    else:
+        ds_test = PerSeg()
+        num_classes = len(ds_test.paths)
 
-    ds_test, data_loader, num_classes = datasets.load(opt, logger, "test", transform='whatever')
-    ds_test.reset_sampler()
-    ds_test.sample_tasks()
     logger.info(f'     ==> {len(ds_test)} testing samples')
 
     sam_checkpoint = "data/pretrained/sam/sam_vit_l_0b3195.pth"
@@ -56,8 +59,16 @@ def test(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=Fals
     metric_m2 = FewShotMetric(n_class=num_classes)
     metric_m3 = FewShotMetric(n_class=num_classes)
     npoints = 1
+    if opt.dataset in ['COCO']:
+        np.random.seed(42)
+        test_sample_indices = np.random.choice(np.arange(len(ds_test)), 500)
+    else:
+        test_sample_indices = np.arange(len(ds_test))
+    bar = tqdm.tqdm(test_sample_indices)
 
-    for sample in bar:
+    for ii in bar:
+        sample = ds_test[ii]
+
         image = sample['qry_rgb'].permute(1, 2, 0).numpy() * 255
         target = sample['qry_msk']
         ref_image = sample['sup_rgb'][0].permute(1, 2, 0).numpy() * 255
@@ -469,15 +480,26 @@ def persam(predictor: SamPredictor, ref_mask, ref_image, test_mask, test_image, 
     return masks[best_idx]
 
 
-def point_selection(mask_sim, topk=1):
+def point_selection(mask_sim, topk=1, random=False):
     # Top-1 point selection
-    w, h = mask_sim.shape
-    topk_xy = mask_sim.flatten(0).topk(topk)[1]
-    topk_x = (topk_xy // h).unsqueeze(0)
-    topk_y = (topk_xy - topk_x * h)
-    topk_xy = torch.cat((topk_y, topk_x), dim=0).permute(1, 0)
-    topk_label = np.array([1] * topk)
-    topk_xy = topk_xy.cpu().numpy()
+    if random == True:
+        w, h = mask_sim.shape
+        topk_xy = mask_sim.flatten(0).topk(100)[1]
+        topk_xy = topk_xy[np.random.randint(topk_xy.shape[0], size=5)]
+        topk_x = (topk_xy // h).unsqueeze(0)
+        topk_y = (topk_xy - topk_x * h)
+        topk_xy = torch.cat((topk_y, topk_x), dim=0).permute(1, 0)
+        topk_label = np.array([1] * 5)
+        topk_xy = topk_xy.cpu().numpy()
+
+    else:
+        w, h = mask_sim.shape
+        topk_xy = mask_sim.flatten(0).topk(topk)[1]
+        topk_x = (topk_xy // h).unsqueeze(0)
+        topk_y = (topk_xy - topk_x * h)
+        topk_xy = torch.cat((topk_y, topk_x), dim=0).permute(1, 0)
+        topk_label = np.array([1] * topk)
+        topk_xy = topk_xy.cpu().numpy()
 
     # Top-last point selection
     last_xy = mask_sim.flatten(0).topk(topk, largest=False)[1]
