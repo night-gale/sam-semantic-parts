@@ -24,9 +24,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.nn as nn
 from torchvision.ops import focal_loss
+from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 
 import matplotlib.pyplot as plt
 import tqdm
+import timm
 
 from per_sam import show_masks, show_anns, show_points, pooled_embedding, show_mask, point_selection
 from data_kits.perseg import PerSeg
@@ -35,6 +37,8 @@ ex = setup(
     Experiment(name="FPTrans", save_git_info=False, base_dir="./")
 )
 torch.set_printoptions(precision=8)
+image_encoder = None
+transforms = None
 
 
 @ex.command(unobserved=True)
@@ -62,18 +66,31 @@ def test(
         num_classes = len(ds_test.paths)
     logger.info(f'     ==> {len(ds_test)} testing samples')
 
-    sam_checkpoint = "data/pretrained/sam/sam_vit_l_0b3195.pth"
-    model_type = "vit_l"
+    sam_checkpoint = "data/pretrained/sam/sam_vit_h_4b8939.pth"
+    model_type = "vit_h"
+
+    global image_encoder, transforms
+    image_encoder = timm.create_model('vit_giant_patch14_dinov2.lvd142m', pretrained=True)
+    image_encoder = image_encoder.eval().cuda()
+
+    # get model specific transforms (normalization, resize)
+    data_config = timm.data.resolve_model_data_config(image_encoder)
+    # transforms = timm.data.create_transform(**data_config, is_training=False)
+    transforms = Compose([
+        Resize(size=(518, 518), interpolation=Image.BICUBIC, max_size=None),
+        ToTensor(),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+    )
 
     device = "cuda"
 
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
     sam.to(device=device)
 
-    classifier = MaskClassifier(dim=256, num_heads=4, output_size=2).cuda()
+    classifier = MaskClassifier(1536, 4, output_size=1).cuda()
 
     mask_predictor = SamPredictor(sam)
-    mask_generator = SamAutomaticMaskGenerator(sam, points_per_batch=32)
+    mask_generator = SamAutomaticMaskGenerator(sam, points_per_side=32, points_per_batch=64)
     results = []
 
     seed = 42
@@ -84,6 +101,10 @@ def test(
         test_sample_indices = np.arange(len(ds_test))
     bar = tqdm.tqdm(test_sample_indices)
     metric_m1 = FewShotMetric(n_class=num_classes)
+
+    plt.imshow(ds_test[test_sample_indices[2]]['qry_rgb'].permute(1, 2, 0))
+    plt.savefig('test.png')
+    exit()
 
     for index, ii in enumerate(bar):
         sample = ds_test[ii]
@@ -180,8 +201,7 @@ def semantic_parts(
         lr=1e-4,
         topk=3,
 ):
-    del classifier
-    classifier = MaskClassifier(256, 4, output_size=1).cuda()
+    classifier = MaskClassifier(1536, 4, output_size=1).cuda()
 
     best_mask, ref_img_labels, ref_input, \
     ref_sam_masks, sim, test_sam_masks = mask_generation(classifier, epochs,
@@ -197,15 +217,15 @@ def semantic_parts(
     boxes = []
     for i in best_mask:
         if sim.flatten()[i].item() > threshold:
-            # mask = np.logical_or(test_sam_masks[i]['segmentation'], mask)
+            mask = np.logical_or(test_sam_masks[i]['segmentation'], mask)
         # mask += test_sam_masks[i]['segmentation'].astype(float) * sim.flatten()[i].item()
-            mask[test_sam_masks[i]['segmentation']] = sim.flatten()[i].item()
+        # mask[test_sam_masks[i]['segmentation']] = sim.flatten()[i].item()
 
-        topk_xy_i, topk_label_i, last_xy_i, last_label_i = point_selection(torch.as_tensor(test_sam_masks[i]['segmentation']).float(), topk=1, random=True)
-        points.append(topk_xy_i)
-        point_labels.append(topk_label_i)
-
-            # # Cascaded Post-refinement-
+    #     topk_xy_i, topk_label_i, last_xy_i, last_label_i = point_selection(torch.as_tensor(test_sam_masks[i]['segmentation']).float(), topk=1, random=True)
+    #     points.append(topk_xy_i)
+    #     point_labels.append(topk_label_i)
+    #
+    #         # # Cascaded Post-refinement-
     # y, x = np.nonzero(mask > 0)
     # x_min = x.min()
     # x_max = x.max()
@@ -214,38 +234,39 @@ def semantic_parts(
     # print(points, point_labels)
     #
     # input_box = np.array([x_min, y_min, x_max, y_max])
-    # boxes.append(input_box)
-
-    mask = predictor.transform.apply_mask(mask.astype(np.int32))
-    mask = torch.as_tensor(mask, device=ref_input.device)
-    mask = predictor.model.preprocess_mask(mask)
-    mask = F.interpolate(mask[None, None, ...].float(), size=(256, 256), mode='nearest').cpu().numpy()
-    mask = mask.squeeze()
-
-    masks, scores, logits, _ = predictor.predict(
-        point_coords=np.concatenate(points, axis=0),
-        point_labels=np.concatenate(point_labels, axis=0),
-        mask_input=mask[None, ...],
-        multimask_output=True)
-    best_idx = np.argmax(scores)
-
-    # Cascaded Post-refinement-2
+    #
+    # mask = predictor.transform.apply_mask(mask.astype(np.int32))
+    # mask = torch.as_tensor(mask, device=ref_input.device)
+    # mask = predictor.model.preprocess_mask(mask)
+    # mask = F.interpolate(mask[None, None, ...].float(), size=(256, 256), mode='nearest').cpu().numpy()
+    # mask = mask.squeeze()
+    #
+    # predictor.set_image(test_image)
+    #
+    # masks, scores, logits, _ = predictor.predict(
+    #     point_coords=np.concatenate(points, axis=0),
+    #     point_labels=np.concatenate(point_labels, axis=0),
+    #     mask_input=mask[None, ...],
+    #     multimask_output=True)
+    # best_idx = np.argmax(scores)
+    #
+    # # Cascaded Post-refinement-2
     # y, x = np.nonzero(masks[best_idx])
     # x_min = x.min()
     # x_max = x.max()
     # y_min = y.min()
     # y_max = y.max()
     # input_box = np.array([x_min, y_min, x_max, y_max])
-    masks, scores, logits, _ = predictor.predict(
-        point_coords=np.concatenate(points, axis=0),
-        point_labels=np.concatenate(point_labels, axis=0),
-        # box=input_box[None, ...],
-        mask_input=logits[best_idx: best_idx + 1, :, :],
-        multimask_output=True)
-    best_idx = np.argmax(scores)
-    print(best_idx)
+    # masks, scores, logits, _ = predictor.predict(
+    #     point_coords=np.concatenate(points, axis=0),
+    #     point_labels=np.concatenate(point_labels, axis=0),
+    #     box=input_box[None, ...],
+    #     mask_input=logits[best_idx: best_idx + 1, :, :],
+    #     multimask_output=True)
+    # best_idx = np.argmax(scores)
+    # print(best_idx)
 
-    return ref_sam_masks, ref_img_labels, masks[best_idx], None
+    return ref_sam_masks, ref_img_labels, mask, None
 
 
 def mask_generation(classifier, epochs, generator, lr, predictor, ref_image, ref_mask, test_image, topk):
@@ -253,13 +274,21 @@ def mask_generation(classifier, epochs, generator, lr, predictor, ref_image, ref
         semantic_parts_embedding(generator, predictor, ref_image, ref_mask)
     test_sam_masks, test_embeddings, _, _ = \
         semantic_parts_embedding(generator, predictor, test_image, None)
-    ref_input = torch.cat((gt_embedding, ref_embeddings), dim=0)
+    print(gt_embedding.shape, ref_embeddings.shape)
+    ref_input_ref = torch.cat((gt_embedding, ref_embeddings), dim=0).unsqueeze(0)
+    ref_input = torch.cat(
+        (ref_embeddings.squeeze().unsqueeze(1), ref_input_ref.repeat(ref_embeddings.shape[0], 1, 1)),
+        dim=1)
     train_mask_classifier(classifier, ref_input, ref_img_labels, ref_mask, ref_sam_masks, epochs=epochs, lr=lr)
-    test_input = torch.cat((gt_embedding, ref_embeddings[ref_img_labels > 0], test_embeddings), dim=0)
+
+    # test_input_ref = torch.cat((gt_embedding, ref_embeddings, test_embeddings), dim=0)
+    test_input = torch.cat(
+        (test_embeddings.squeeze().unsqueeze(1), ref_input_ref.repeat(test_embeddings.shape[0], 1, 1)),
+        dim=1)
     # test_input = torch.cat((gt_embedding, test_embeddings), dim=0)
-    sim = classifier(test_input[None, ...])
+    sim = classifier(test_input)
     sim = torch.sigmoid(sim)
-    sim = sim.squeeze()[1 + (ref_img_labels[ref_img_labels > 0]).shape[0]:]
+    sim = sim.squeeze()[:, 0]
     # sim = sim.squeeze()[1:]
     num_masks = topk if len(sim) > topk else len(sim)
     best_mask = sim.flatten().topk(num_masks)[1]
@@ -284,8 +313,8 @@ def train_mask_classifier(
 
         bar = range(ref_iters)
         for ii in bar:
-            ref_pred = classifier.forward(ref_embeddings[None, ...])
-            loss = criterion(ref_pred.squeeze()[1:], ref_img_labels.float(), reduction='mean')
+            ref_pred = classifier.forward(ref_embeddings)
+            loss = criterion(ref_pred.squeeze()[:, 0], ref_img_labels.float(), reduction='mean')
 
             optimizer.zero_grad()
             loss.backward()
@@ -341,8 +370,13 @@ def semantic_parts_embedding(generator, predictor, ref_image, ref_mask):
     # trivial solution: intersection over union and training with soft label
     masks = generator.generate(ref_image)
 
-    ref_mask, ref_image = predictor.set_image(ref_image, ref_mask)
-    ref_feat = predictor.features.squeeze().permute(1, 2, 0)
+    # ref_mask, ref_image = predictor.set_image(ref_image, ref_mask)
+    # ref_feat = predictor.features.squeeze().permute(1, 2, 0)
+    mask_transforms = Compose(transforms.transforms[0:-1])
+    ref_image = transforms(Image.fromarray(ref_image))
+    if ref_mask is not None:
+        ref_mask = mask_transforms(Image.fromarray(ref_mask.squeeze())).cuda()
+    ref_feat = image_encoder.forward_features(ref_image.unsqueeze(0).cuda()).squeeze()[1:].reshape(37, 37, -1)
 
     target_embedding = None
     if ref_mask is not None:
@@ -357,9 +391,10 @@ def semantic_parts_embedding(generator, predictor, ref_image, ref_mask):
     masks_ret = []
     for mask_dict in masks:
         mask = mask_dict['segmentation']
-        mask = predictor.transform.apply_mask(mask.astype(np.int32))
+        # mask = predictor.transform.apply_mask(mask.astype(np.int32))
+        mask = mask_transforms(Image.fromarray(mask))
         mask = torch.as_tensor(mask, device=ref_feat.device)
-        mask = predictor.model.preprocess_mask(mask)
+        # mask = predictor.model.preprocess_mask(mask)
 
         mask_embedding = pooled_embedding(mask, predictor, ref_feat)
 
@@ -370,7 +405,7 @@ def semantic_parts_embedding(generator, predictor, ref_image, ref_mask):
             iou = metric(mask.squeeze(), ref_mask.squeeze().bool())
             if torch.isnan(iou):
                 continue
-            labels.append(iou > 0.1)
+            labels.append(iou > 0.05)
         mask_embeddings.append(mask_embedding)
         masks_ret.append(mask_dict)
 
@@ -379,6 +414,7 @@ def semantic_parts_embedding(generator, predictor, ref_image, ref_mask):
     if ref_mask is not None:
         labels_ret = torch.tensor(labels, device=mask_embeddings_ret.device)
 
+    print(mask_embeddings_ret.shape)
     return masks_ret, mask_embeddings_ret, labels_ret, target_embedding
 
 

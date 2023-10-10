@@ -10,7 +10,6 @@ from constants import on_cloud
 from core.base_trainer import BaseTrainer, BaseEvaluator
 from core.losses import get as get_loss_obj
 from data_kits import datasets
-from networks import load_model
 from utils_ import misc
 from utils_.eval_metrics import UnsupervisedMetrics
 from core.metrics import FewShotMetric
@@ -19,9 +18,14 @@ from segment_anything import SamAutomaticMaskGenerator
 from timm.models import vit_base_patch32_224_clip_laion2b, vit_base_patch16_224_dino
 from data_kits.perseg import PerSeg
 import torch.nn.functional as F
+import timm
 
+from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 import matplotlib.pyplot as plt
 import tqdm
+
+image_encoder = None
+transforms = None
 
 ex = setup(
     Experiment(name="FPTrans", save_git_info=False, base_dir="./")
@@ -33,6 +37,8 @@ torch.set_printoptions(precision=8)
 def test(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=False):
     opt, logger, device = init_environment(ex, _run, _config, eval_after_train=eval_after_train)
 
+    torch.set_printoptions(precision=3)
+
     if opt.dataset in ['PASCAL', 'COCO']:
         ds_test, data_loader, num_classes = datasets.load(opt, logger, "test", transform='whatever')
         ds_test.reset_sampler()
@@ -43,13 +49,26 @@ def test(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=Fals
 
     logger.info(f'     ==> {len(ds_test)} testing samples')
 
-    sam_checkpoint = "data/pretrained/sam/sam_vit_l_0b3195.pth"
-    model_type = "vit_l"
+    sam_checkpoint = "data/pretrained/sam/sam_vit_h_4b8939.pth"
+
+    model_type = "vit_h"
 
     device = "cuda"
 
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
     sam.to(device=device)
+
+    global image_encoder, transforms
+    image_encoder = timm.create_model('vit_giant_patch14_dinov2.lvd142m', pretrained=True)
+    image_encoder = image_encoder.eval().cuda()
+
+    # get model specific transforms (normalization, resize)
+    data_config = timm.data.resolve_model_data_config(image_encoder)
+    transforms = Compose([
+        Resize(size=(518, 518), interpolation=Image.BICUBIC, max_size=None),
+        ToTensor(),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+    )
 
     mask_predictor = SamPredictor(sam)
     mask_generator = SamAutomaticMaskGenerator(sam)
@@ -69,17 +88,28 @@ def test(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=Fals
     for ii in bar:
         sample = ds_test[ii]
 
-        image = sample['qry_rgb'].permute(1, 2, 0).numpy() * 255
-        target = sample['qry_msk']
-        ref_image = sample['sup_rgb'][0].permute(1, 2, 0).numpy() * 255
-        ref_mask = sample['sup_msk'][0:1].permute(1, 2, 0).numpy()
-        image = image.astype(np.uint8)
-        ref_image = ref_image.astype(np.uint8)
+        if opt.dataset in ['PASCAL', 'COCO']:
+            image = sample['qry_rgb'].permute(1, 2, 0).numpy() * 255
+            target = sample['qry_msk']
+            ref_image = sample['sup_rgb'][0].permute(1, 2, 0).numpy() * 255
+            ref_mask = sample['sup_msk'][0:1].permute(1, 2, 0).numpy()
+            image = image.astype(np.uint8)
+            ref_image = ref_image.astype(np.uint8)
+            sample_cls = sample['cls']
+            if ref_mask is not None:
+                ref_mask[ref_mask > 10] = 0
+        else:
+            image = sample['qry_rgb']
+            target = sample['qry_msk'][:, :, 0]
+            target = target > 0
+            ref_image = sample['sup_rgb']
+            ref_mask = sample['sup_msk'][:, :, 0:1]
+            sample_cls = sample['cls']
 
-        # mask, sim_image, (masks, sims) = semantic_parts(mask_generator, predictor=mask_predictor,
-        #                       test_image=image, ref_image=ref_image, ref_mask=ref_mask, encoder=clip_image_encoder)
+        mask, sim_image, (masks, sims) = semantic_parts(mask_generator, predictor=mask_predictor,
+                              test_image=image, ref_image=ref_image, ref_mask=ref_mask, encoder=image_encoder)
         # mask = persam(mask_predictor, ref_mask, ref_image, target, image, 1)
-        mask = persam_f(mask_predictor, ref_mask, ref_image, target, image, 1)
+        # mask = persam_f(mask_predictor, ref_mask, ref_image, target, image, 1)
         # masks = mask_generator.generate(image)
 
         # masks, point_coords, point_labels = persam(
@@ -95,16 +125,20 @@ def test(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=Fals
         metric_m1.update(mask[None, ...], target[None, ...], [sample['cls']], verbose=False)
         # metric_m2.update((masks[1] > 0)[None, ...], target[None, ...], [sample['cls']], verbose=False)
         # metric_m3.update((masks[2] > 0)[None, ...], target[None, ...], [sample['cls']], verbose=False)
-        miou_class_1, miou_avg_1 = metric_m1.get_scores(datasets.get_val_labels(opt, None))
+        if opt.dataset in ['PASCAL', 'COCO']:
+            miou_class_1, miou_avg_1 = metric_m1.get_scores(datasets.get_val_labels(opt, None))
+        else:
+            miou_class_1, miou_avg_1 = metric_m1.get_scores(list(range(1, num_classes)))
         # miou_class_2, miou_avg_2 = metric_m1.get_scores(datasets.get_val_labels(opt, None))
         # miou_class_3, miou_avg_3 = metric_m1.get_scores(datasets.get_val_labels(opt, None))
-        bar.set_description(f"mIoU 1: {miou_avg_1} class_miou: {miou_class_1}")
+        bar.set_description(f'miou: {miou_avg_1}')
+        print(miou_class_1)
 
         plt.figure(figsize=(20, 20))
         plt.subplot(3, 1, 1)
         plt.imshow(image)
-        show_mask(mask, ax=plt, random_color=True)
-        # show_masks(plt, masks, sims)
+        # show_mask(mask, ax=plt, random_color=True)
+        show_masks(plt, masks, sims)
         # show_anns(masks)
         plt.axis('off')
         plt.subplot(3, 1, 2)
@@ -113,10 +147,10 @@ def test(_run, _config, exp_id=-1, ckpt=None, strict=True, eval_after_train=Fals
         # show_points(point_coords, labels=point_labels, ax=plt)
         plt.axis('off')
         plt.subplot(3, 1, 3)
-        # plt.imshow(sim_image)
-        plt.imshow(ref_image)
+        plt.imshow(sim_image)
+        # plt.imshow(ref_image)
 
-        show_mask(ref_mask[:, :, 0], ax=plt, random_color=True)
+        # show_mask(ref_mask[:, :, 0], ax=plt, random_color=True)
         plt.axis('off')
         # for ii, mask in enumerate(masks):
         #     plt.subplot(4, 1, ii + 2)
@@ -142,6 +176,7 @@ def show_masks(ax, masks, sims):
 @torch.no_grad()
 def semantic_parts(generator: SamAutomaticMaskGenerator,
                    predictor: SamPredictor, test_image, ref_image, ref_mask, encoder=None):
+    shape = test_image.shape[0:2]
     masks = generator.generate(test_image)
 
     clip_image_encoder = encoder
@@ -149,43 +184,53 @@ def semantic_parts(generator: SamAutomaticMaskGenerator,
     if ref_mask is not None:
         ref_mask[ref_mask > 10] = 0
 
-    ref_mask, ref_image = predictor.set_image(ref_image, ref_mask)
-    ref_feat = predictor.features.squeeze().permute(1, 2, 0)
+    # ref_mask, ref_image = predictor.set_image(ref_image, ref_mask)
+    # ref_feat = predictor.features.squeeze().permute(1, 2, 0)
     # ref_image = F.interpolate(ref_image, size=(224, 224), mode='bilinear')
     # ref_feat = clip_image_encoder.forward_features(ref_image)
     # ref_feat = ref_feat[:, 1:, ...].reshape(14, 14, 768)
-    # print(ref_feat.shape)
-    clip_ref_feat = clip_embedding(ref_mask, ref_image, clip_image_encoder, predictor)
+    # # print(ref_feat.shape)
+    # clip_ref_feat = clip_embedding(ref_mask, ref_image, clip_image_encoder, predictor)
+
+    mask_transforms = Compose(transforms.transforms[0:-1])
+    ref_image = transforms(Image.fromarray(ref_image))
+    if ref_mask is not None:
+        ref_mask = mask_transforms(Image.fromarray(ref_mask.squeeze())).cuda()
+    ref_feat = image_encoder.forward_features(ref_image.unsqueeze(0).cuda()).squeeze()[1:].reshape(37, 37, -1)
 
     # ref_mask = torch.as_tensor(ref_mask[:, :0], device=ref_feat.device)
-    ref_mask = F.interpolate(ref_mask, size=ref_feat.shape[0: 2], mode="nearest")
-    ref_mask = ref_mask.squeeze()
-    print(ref_mask.shape)
+    # ref_mask = F.interpolate(ref_mask, size=ref_feat.shape[0: 2], mode="nearest")
+    # ref_mask = ref_mask.squeeze()
+    # print(ref_mask.shape)
 
-    # Target feature extraction
-    target_feat = ref_feat[torch.logical_and(ref_mask > 0, ref_mask < 10)]
+    target_embedding = pooled_embedding(ref_mask, predictor, ref_feat)
 
-    target_embedding = target_feat.mean(0).unsqueeze(0)
-    # target_embedding = target_embedding / target_embedding.norm(dim=-1, keepdim=True)
-    target_embedding = target_embedding.squeeze()
-
-    _, test_image = predictor.set_image(test_image)
-    test_feat = predictor.features.squeeze().permute(1, 2, 0)
+    # _, test_image = predictor.set_image(test_image)
+    # test_feat = predictor.features.squeeze().permute(1, 2, 0)
     # test_image = F.interpolate(test_image, size=(224, 224), mode='bilinear')
     # test_feat = clip_image_encoder.forward_features(test_image)
     # test_feat = test_feat[:, 1:, ...].reshape(14, 14, 768)
+    test_image = transforms(Image.fromarray(test_image))
+    test_feat = image_encoder.forward_features(test_image.unsqueeze(0).cuda()).squeeze()[1:].reshape(37, 37, -1)
 
     mask_embeddings = []
     for mask_dict in masks:
         mask = mask_dict['segmentation']
-        mask = predictor.transform.apply_mask(mask.astype(np.int32))
-        mask = torch.as_tensor(mask, device=test_feat.device)
-        mask = predictor.model.preprocess_mask(mask)
+        # mask = predictor.transform.apply_mask(mask.astype(np.int32))
+        # mask = torch.as_tensor(mask, device=test_feat.device)
+        # mask = predictor.model.preprocess_mask(mask)
+
+        mask = mask_transforms(Image.fromarray(mask))
+        mask = torch.as_tensor(mask, device=ref_feat.device)
+        # mask = predictor.model.preprocess_mask(mask)
+
+        mask_embedding = pooled_embedding(mask, predictor, test_feat)
 
         # mask_embedding = pooled_embedding(mask, predictor, test_feat)
-        clip_mask_embedding = clip_embedding(mask, test_image, clip_image_encoder, predictor)
+        # clip_mask_embedding = clip_embedding(mask, test_image, clip_image_encoder, predictor)
         # mask_embedding = mask_embedding / mask_embedding.norm(dim=-1, keepdim=True)
-        mask_embeddings.append(clip_mask_embedding)
+        # mask_embeddings.append(clip_mask_embedding)
+        mask_embeddings.append(mask_embedding)
 
     # print(test_feat.shape, target_embedding.shape)
     image_sim = test_feat / test_feat.norm(dim=-1, keepdim=True) \
@@ -193,24 +238,25 @@ def semantic_parts(generator: SamAutomaticMaskGenerator,
 
     image_sim = image_sim.squeeze()
 
-    # image_sim = F.interpolate(image_sim[None, None, ...], size=(64, 64), mode='bilinear')
+    image_sim = F.interpolate(image_sim[None, None, ...], size=shape, mode='bilinear')
     # image_sim = image_sim.squeeze()
 
-    image_sim = predictor.model.postprocess_masks(
-                image_sim[None, None, ...],
-                input_size=predictor.input_size,
-                original_size=predictor.original_size)
-    print(torch.histogram(image_sim.cpu()))
+    # image_sim = predictor.model.postprocess_masks(
+    #             image_sim[None, None, ...],
+    #             input_size=predictor.input_size,
+    #             original_size=predictor.original_size)
+    # print(torch.histogram(image_sim.cpu()))
 
     embeddings = torch.cat(mask_embeddings, dim=0)
-    sim = F.cosine_similarity(embeddings, clip_ref_feat, dim=1)
+    print(embeddings.shape, ref_feat.shape)
+    sim = F.cosine_similarity(embeddings, target_embedding, dim=1)
     sim = torch.nan_to_num(sim, -1)
     best_mask = sim.flatten().topk(5)[1]
     print(sim.flatten()[best_mask])
 
     mask = np.zeros_like(masks[0]['segmentation'])
     for i in best_mask:
-        if sim.flatten()[i] > 0.8:
+        if sim.flatten()[i] > 0.85:
             mask = np.logical_or(masks[i]['segmentation'], mask)
 
     return mask, image_sim.squeeze().cpu(), [masks, sim.flatten()]
@@ -219,12 +265,13 @@ def semantic_parts(generator: SamAutomaticMaskGenerator,
 @torch.no_grad()
 def pooled_embedding(mask, predictor, test_feat):
     mask = mask.squeeze()
-    mask = F.interpolate(mask[None, None, ...].float(), size=test_feat.shape[0:2], mode='nearest')
-    mask = mask.squeeze()
+    test_feat = F.interpolate(test_feat.permute(2, 0, 1).unsqueeze(0), size=mask.shape[0:2], mode='bilinear')
+    # mask = mask.squeeze()
+    test_feat = test_feat.squeeze().permute(1, 2, 0)
     mask_feat = test_feat[mask > 0]
     target_feat_mean = mask_feat.mean(0)
     if len(mask_feat) == 0:
-        return target_feat_mean
+        return target_feat_mean.unsqueeze(0)
     target_feat_max = torch.max(mask_feat, dim=0)[0]
     target_feat = (target_feat_max / 2 + target_feat_mean / 2).unsqueeze(0)
 
@@ -243,8 +290,6 @@ def persam_f(predictor: SamPredictor, ref_mask, ref_image, test_mask, test_image
     for name, param in predictor.model.named_parameters():
         param.requires_grad = False
 
-    if ref_mask is not None:
-        ref_mask[ref_mask > 10] = 0
 
     gt_mask = torch.tensor(ref_mask)[:, :, 0] > 0
     gt_mask = gt_mask.float().unsqueeze(0).flatten(1).cuda()
@@ -252,7 +297,7 @@ def persam_f(predictor: SamPredictor, ref_mask, ref_image, test_mask, test_image
     ref_mask, _ = predictor.set_image(ref_image, ref_mask)
     ref_feat = predictor.features.squeeze().permute(1, 2, 0)
 
-    ref_mask = F.interpolate(ref_mask, size=ref_feat.shape[0: 2], mode="bilinear")
+    ref_mask = F.interpolate(ref_mask.float(), size=ref_feat.shape[0: 2], mode="bilinear")
     ref_mask = ref_mask.squeeze()
 
     # Target feature extraction
